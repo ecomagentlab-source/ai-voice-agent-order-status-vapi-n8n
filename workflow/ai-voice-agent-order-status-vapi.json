@@ -1,0 +1,670 @@
+{
+  "name": "E-commerce Voice Agent | Vapi Order Status + Returns",
+  "nodes": [
+    {
+      "id": "s1",
+      "name": "Note s1",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -420
+      ],
+      "parameters": {
+        "content": "## E-commerce Voice Agent (Vapi + n8n)\n**During the call** Vapi calls this webhook with a tool call:\n- `check_order_status` reads the **Orders** tab and answers live\n- `request_return` checks eligibility and adds a row to **Returns**\n\n**After the call** the end-of-call report is turned into a row in the **Calls** tab (OpenAI pulls name, order, intent, summary).\n\nSheet: E-commerce Voice Agent Demo (sample data).",
+        "width": 560,
+        "height": 330,
+        "color": 4
+      }
+    },
+    {
+      "id": "n1",
+      "name": "Vapi Ecom Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -440,
+        120
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "vapi-ecom",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "7f660125-b744-48e8-837c-a3817731bfab"
+    },
+    {
+      "id": "n2",
+      "name": "Is Tool Call?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -220,
+        120
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.body.message.type }}",
+              "rightValue": "tool-calls",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n3",
+      "name": "Read Orders",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        20,
+        0
+      ],
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Orders",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "YOUR_GOOGLE_SHEETS_CREDENTIAL"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "n4",
+      "name": "Handle Tool Call",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "\nconst body = $('Vapi Ecom Webhook').first().json.body || {};\nconst m = body.message || {};\nconst calls = m.toolCallList || m.toolCalls || [];\nconst callerPhone = (m.call && m.call.customer && m.call.customer.number) || (m.customer && m.customer.number) || '';\nconst orders = $input.all().map(i => i.json).filter(o => o['Order ID']);\nconst digits = s => String(s || '').replace(/\\D/g, '');\nconst find = (id) => { const d = digits(id); return d ? orders.find(o => digits(o['Order ID']) === d) : null; };\nconst results = []; const returnRows = [];\nfor (const tc of calls) {\n  const fn = tc.function || {};\n  let args = fn.arguments || tc.arguments || {};\n  if (typeof args === 'string') { try { args = JSON.parse(args); } catch (e) { args = {}; } }\n  const o = find(args.order_id);\n  let result;\n  if (fn.name === 'check_order_status') {\n    if (!o) result = `No order found with number ${args.order_id || '(not given)'}. Ask the caller to repeat the order number digit by digit. Valid demo order numbers are 4 digits.`;\n    else {\n      const parts = [`Order ${o['Order ID']} for ${o['Customer Name']}: ${o['Quantity']} x ${o['Product']}, total ${o['Amount']}, placed on ${o['Order Date']}.`, `Current status: ${o['Status']}.`];\n      if (o['Courier']) parts.push(`Courier: ${o['Courier']}, tracking number ${o['Tracking Number']}.`);\n      if (o['Expected Delivery'] && !['Delivered','Cancelled'].includes(o['Status'])) parts.push(`Expected delivery: ${o['Expected Delivery']}.`);\n      if (o['Status'] === 'Delivered') parts.push(`It was delivered on ${o['Expected Delivery']}. Returns are allowed within 7 days of delivery.`);\n      parts.push(`Delivery city: ${o['City']}.`);\n      result = parts.join(' ');\n    }\n  } else if (fn.name === 'request_return') {\n    if (!o) result = `No order found with number ${args.order_id || '(not given)'}. A return cannot be created without a valid order number.`;\n    else if (o['Status'] !== 'Delivered') result = `Order ${o['Order ID']} is \"${o['Status']}\", so it cannot be returned yet. Only delivered orders can be returned. If it is not shipped yet, tell the caller a human agent can help with cancellation.`;\n    else {\n      const rid = 'R' + Date.now().toString().slice(-6);\n      returnRows.push({ 'Request ID': rid, 'Received At': $now.setZone('Asia/Karachi').toFormat('yyyy-MM-dd HH:mm') + ' PKT', 'Order ID': o['Order ID'], 'Customer Name': args.customer_name || o['Customer Name'], 'Caller Phone': callerPhone, 'Reason': args.reason || '', 'Status': 'New' });\n      result = `Return request ${rid} created for order ${o['Order ID']} (${o['Product']}). The team will email pickup details within 24 hours and the refund of ${o['Amount']} is processed within 5 to 7 business days after pickup.`;\n    }\n  } else result = `Unknown tool ${fn.name}.`;\n  results.push({ toolCallId: tc.id, result });\n}\nreturn [{ json: { response: { results }, returnRows } }];\n"
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Answer Vapi",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        460,
+        0
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.response) }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "n6",
+      "name": "New Return?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        680,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.returnRows.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n7",
+      "name": "Return Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        -20
+      ],
+      "parameters": {
+        "jsCode": "\nreturn $('Handle Tool Call').first().json.returnRows.map(r => ({ json: r }));\n"
+      }
+    },
+    {
+      "id": "n8",
+      "name": "Add to Returns Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1120,
+        -20
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Returns",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Request ID",
+              "displayName": "Request ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Received At",
+              "displayName": "Received At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Order ID",
+              "displayName": "Order ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Customer Name",
+              "displayName": "Customer Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Caller Phone",
+              "displayName": "Caller Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Reason",
+              "displayName": "Reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "YOUR_GOOGLE_SHEETS_CREDENTIAL"
+        }
+      }
+    },
+    {
+      "id": "n9",
+      "name": "OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        20,
+        260
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"ok\":true}",
+        "options": {}
+      }
+    },
+    {
+      "id": "n10",
+      "name": "Is End Of Call Report?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        260
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $('Vapi Ecom Webhook').first().json.body.message.type }}",
+              "rightValue": "end-of-call-report",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "n11",
+      "name": "Parse Call Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        240
+      ],
+      "parameters": {
+        "jsCode": "\nconst b = $('Vapi Ecom Webhook').first().json.body || {};\nconst m = b.message || {};\nconst call = m.call || {};\nconst art = m.artifact || {};\nreturn [{ json: {\n  callId: call.id || '',\n  callerPhone: (call.customer && call.customer.number) || (call.type === 'webCall' ? 'Web call' : ''),\n  transcript: m.transcript || art.transcript || '',\n  vapiSummary: (m.analysis && m.analysis.summary) || m.summary || '',\n  durationSec: m.durationSeconds != null ? Math.round(m.durationSeconds) : '',\n  cost: m.cost != null ? Number(m.cost).toFixed(3) : '',\n  endedReason: m.endedReason || '',\n  recordingUrl: m.recordingUrl || art.recordingUrl || (art.recording && art.recording.mono && art.recording.mono.combinedUrl) || '',\n}}];\n"
+      }
+    },
+    {
+      "id": "n12",
+      "name": "AI Call Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        240
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ model: 'gpt-4.1-mini', temperature: 0.2, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: \"You read a phone call transcript between an e-commerce store's AI support agent and a customer. Return JSON with keys: customerName, orderId, intent (one of: Order Status, Return, Cancellation, Product Question, Complaint, Other), resolved (YES or NO), summary (2 short sentences in English). Use empty string when a value was not said. Never invent values.\" }, { role: 'user', content: 'Transcript:\\n' + ($json.transcript || '(empty)') } ] }) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "name": "YOUR_OPENAI_CREDENTIAL"
+        }
+      }
+    },
+    {
+      "id": "n13",
+      "name": "Build Call Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        240
+      ],
+      "parameters": {
+        "jsCode": "\nconst base = $('Parse Call Report').first().json;\nlet ai = {};\ntry { ai = JSON.parse($json.choices[0].message.content); } catch (e) { ai = {}; }\nreturn [{ json: {\n  'Received At': $now.setZone('Asia/Karachi').toFormat('yyyy-MM-dd HH:mm') + ' PKT',\n  'Call ID': base.callId,\n  'Caller Phone': base.callerPhone,\n  'Customer Name': ai.customerName || '',\n  'Order ID': ai.orderId || '',\n  'Intent': ai.intent || 'Other',\n  'Resolved': ai.resolved || '',\n  'Summary': ai.summary || base.vapiSummary,\n  'Duration (sec)': base.durationSec,\n  'Cost ($)': base.cost,\n  'Ended Reason': base.endedReason,\n  'Recording URL': base.recordingUrl,\n}}];\n"
+      }
+    },
+    {
+      "id": "n14",
+      "name": "Add to Calls Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1120,
+        240
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Calls",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Received At",
+              "displayName": "Received At",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Call ID",
+              "displayName": "Call ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Caller Phone",
+              "displayName": "Caller Phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Customer Name",
+              "displayName": "Customer Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Order ID",
+              "displayName": "Order ID",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Intent",
+              "displayName": "Intent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Resolved",
+              "displayName": "Resolved",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Summary",
+              "displayName": "Summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Duration (sec)",
+              "displayName": "Duration (sec)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Cost ($)",
+              "displayName": "Cost ($)",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Ended Reason",
+              "displayName": "Ended Reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Recording URL",
+              "displayName": "Recording URL",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {
+          "cellFormat": "RAW"
+        }
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "YOUR_GOOGLE_SHEETS_CREDENTIAL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Vapi Ecom Webhook": {
+      "main": [
+        [
+          {
+            "node": "Is Tool Call?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Tool Call?": {
+      "main": [
+        [
+          {
+            "node": "Read Orders",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Orders": {
+      "main": [
+        [
+          {
+            "node": "Handle Tool Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Tool Call": {
+      "main": [
+        [
+          {
+            "node": "Answer Vapi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Vapi": {
+      "main": [
+        [
+          {
+            "node": "New Return?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New Return?": {
+      "main": [
+        [
+          {
+            "node": "Return Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Return Rows": {
+      "main": [
+        [
+          {
+            "node": "Add to Returns Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OK": {
+      "main": [
+        [
+          {
+            "node": "Is End Of Call Report?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is End Of Call Report?": {
+      "main": [
+        [
+          {
+            "node": "Parse Call Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Call Report": {
+      "main": [
+        [
+          {
+            "node": "AI Call Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Call Summary": {
+      "main": [
+        [
+          {
+            "node": "Build Call Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Call Row": {
+      "main": [
+        [
+          {
+            "node": "Add to Calls Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Karachi",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "active": false
+}
